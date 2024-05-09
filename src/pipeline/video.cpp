@@ -141,7 +141,7 @@ void transcode_video(
           packet->flags |= AV_PKT_FLAG_DISCARD;
       }
 
-      // start marking packets going backwards from the end the end of the cut as to not be displayed until the delay is accounted for
+      // start marking packets going backwards from the end of the cut as to not be displayed until the delay is accounted for
       for (
         auto packet = (*in_ctx->packets).rbegin(); 
         packet != (*in_ctx->packets).rend() && abs(time_video_delay) >= abs(time_video_delay - (*packet)->duration); 
@@ -202,14 +202,15 @@ void transcode_video(
       auto out_ctx = new QUEUE_ITEM();
       out_ctx->packets = new std::vector<AVPacket *>();
 
-      int64_t time_of_complete_cuts_kept_before_segment = av_rescale_q(centiseconds_of_complete_cuts_kept_before_segment, CUT_TIMEBASE, native_stream_timebase);
+      const int64_t time_of_complete_cuts_kept_before_segment = av_rescale_q(centiseconds_of_complete_cuts_kept_before_segment, CUT_TIMEBASE, native_stream_timebase);
 
       // copy pointers to input packets
       auto packets_sorted_pts = *in_ctx->packets;
       // sort pointers to input packets by their presentation timestamps
       std::sort(packets_sorted_pts.begin(), packets_sorted_pts.end(), [](AVPacket *a, AVPacket *b) { return a->pts < b->pts; });
 
-      auto packets_sorted_pts_chunked_by_cut_starts = std::vector<std::vector<AVPacket *>>(segment_cuts.size()+1);
+      const size_t packets_sorted_pts_chunked_by_cut_starts_size = segment_cuts.size()+1;
+      auto packets_sorted_pts_chunked_by_cut_starts = new std::vector<AVPacket *>[packets_sorted_pts_chunked_by_cut_starts_size];
       for (
         auto cut_current = segment_cuts.begin(); 
         auto packet : packets_sorted_pts
@@ -245,10 +246,10 @@ void transcode_video(
         packets_sorted_pts_chunked_by_cut_starts[cut_current - segment_cuts.begin()].push_back(packet);
       }
 
-      // initialize vector to carry the time discarded up until each cut in the segment
-      auto time_discarded_before_cuts = std::vector<int64_t>(segment_cuts.size());
-      // initialize vector to carry the video delay up until each cut in the segment
-      auto time_video_delay_before_cuts = std::vector<int64_t>(segment_cuts.size());
+      // array to carry the time discarded up until each cut in the segment
+      auto time_discarded_before_cuts = new int64_t[segment_cuts.size()];
+      // array to carry the video delay up until each cut in the segment
+      auto time_video_delay_before_cuts = new int64_t[segment_cuts.size()];
       // initialize variable to store the sum of time from all cuts passed in the segment
       int64_t time_of_complete_cuts_kept_within_segment = 0;
       for (
@@ -302,7 +303,7 @@ void transcode_video(
 
       // shift all timestamps by the offset appropriate for the cut they're in
       // packets that will be deleted are shifted by the offset of the last cut
-      for (size_t cut_idx = 0; cut_idx < packets_sorted_pts_chunked_by_cut_starts.size(); cut_idx++)
+      for (size_t cut_idx = 0; cut_idx < packets_sorted_pts_chunked_by_cut_starts_size; cut_idx++)
       {
         size_t cut_idx_clamped = std::min(segment_cuts.size() - 1, cut_idx);
 
@@ -335,6 +336,10 @@ void transcode_video(
           }
         }
       }
+
+      delete[] time_discarded_before_cuts;
+      delete[] time_video_delay_before_cuts;
+      delete[] packets_sorted_pts_chunked_by_cut_starts;
    
       // if dts_prev has not been set yet, set it to the earliest dts in the segment
       if (dts_prev == std::numeric_limits<int64_t>::min())

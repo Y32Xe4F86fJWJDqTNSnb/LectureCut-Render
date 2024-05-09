@@ -31,7 +31,7 @@ void transcode_audio(
 
   size_t queue_id = output_queue->set_working();
 
-  // don't relay metadata (audio thread does that)
+  // don't relay metadata (video thread does that)
   METADATA **metadata_ptr;
   input_queue->get_special(&metadata_ptr);
   METADATA *metadata = *metadata_ptr;
@@ -136,7 +136,7 @@ void transcode_audio(
         packet->pts -= time_discarded_before_first_and_only_cut_in_segment + time_audio_delay;
       }
 
-      // start marking packets going backwards from the end the end of the cut as to not be displayed until the delay is accounted for
+      // start marking packets going backwards from the end of the cut as to not be displayed until the delay is accounted for
       for (
         auto packet = (*in_ctx->packets).rbegin(); 
         packet != (*in_ctx->packets).rend() && abs(time_audio_delay) >= abs(time_audio_delay - (*packet)->duration); 
