@@ -1,5 +1,7 @@
-# Build artifacts
-build/
-CMakeUserPresets.json
-.idea/
-.vscode/
+*
+!src/
+!.gitignore
+!CMakeLists.txt
+!conanfile.py
+!LICENSE
+!README.md

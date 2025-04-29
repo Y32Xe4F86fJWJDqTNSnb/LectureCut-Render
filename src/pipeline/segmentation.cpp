@@ -1,109 +1,111 @@
-#include "pipeline.h"
+#include "segmentation.h"
+#include "../definitions.h"
 
-extern "C" {
-  #include "libavcodec/avcodec.h"
-  #include "libavformat/avformat.h"
-}
+#include <print>
+
+#include <algorithm>
 
 void segment(
-  const char *file,
-  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *video_output_queue,
-  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *audio_output_queue
+  const char * filename,
+  PipelineQueue<QueueItem, Metadata> & videoOutputQueue,
+  PipelineQueue<QueueItem, Metadata> & audioOutputQueue,
+  ProgressCallback * progressCallback, 
+  ErrorCallback * errorCallback
 )
 {
-  size_t video_queue_id = video_output_queue->set_working();
-  size_t audio_queue_id = audio_output_queue->set_working();
-
-  AVFormatContext *inputFormatContext = nullptr;
-  AVPacket pkt;
-  int videoStreamIndex = -1;
-  int audioStreamIndex = -1;
-  std::vector<AVPacket *> *video_packets = nullptr;
-  std::vector<AVPacket *> *audio_packets = nullptr;
-
-  if (avformat_open_input(&inputFormatContext, file, NULL, NULL) < 0) {
-    throw std::runtime_error("error opening input file");
+  std::shared_ptr<InputFormatContext> spInputFormatContext;
+  {
+    auto optInputFormatContext = InputFormatContext::open(filename);
+    if(!optInputFormatContext)
+      return errorCallback("Failed to open input format context");
+    spInputFormatContext = std::make_shared<InputFormatContext>(std::move(optInputFormatContext.value()));
   }
+  auto & inputFormatContext = *spInputFormatContext.get();
 
-  if (avformat_find_stream_info(inputFormatContext, NULL) < 0) {
-    throw std::runtime_error("error finding stream info");
-  }
+  std::span streams {inputFormatContext->streams, inputFormatContext->nb_streams};
 
-  for (unsigned int i = 0; i < inputFormatContext->nb_streams; i++) {
-    if (inputFormatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      videoStreamIndex = i;
-    } else if (inputFormatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-      audioStreamIndex = i;
-    }
-  }
-
-  if (videoStreamIndex == -1 || audioStreamIndex == -1) {
-    throw std::runtime_error("error finding video or audio stream");
-  }
-
-  if (inputFormatContext->streams[videoStreamIndex]->codecpar == nullptr ||
-      inputFormatContext->streams[audioStreamIndex]->codecpar == nullptr) {
-    throw std::runtime_error("error finding video or audio codec parameters");
-  }
-
-  AVCodecParameters *videoCodecParametersCopy = avcodec_parameters_alloc();
-  AVCodecParameters *audioCodecParametersCopy = avcodec_parameters_alloc();
-  if (avcodec_parameters_copy(videoCodecParametersCopy, inputFormatContext->streams[videoStreamIndex]->codecpar) < 0) {
-    throw std::runtime_error("error copying video codec parameters");
-  }
-  if (avcodec_parameters_copy(audioCodecParametersCopy, inputFormatContext->streams[audioStreamIndex]->codecpar) < 0) {
-    throw std::runtime_error("error copying audio codec parameters");
-  }
-
-  METADATA *metadata = new METADATA();
-  metadata->format_ctx = inputFormatContext;
-  metadata->video_stream = inputFormatContext->streams[videoStreamIndex];
-  metadata->audio_stream = inputFormatContext->streams[audioStreamIndex];
-  audio_output_queue->set_special(&metadata);
-  video_output_queue->set_special(&metadata);
-
-  while (av_read_frame(inputFormatContext, &pkt) == 0) {
-    if (pkt.stream_index != videoStreamIndex && pkt.stream_index != audioStreamIndex)
+  auto const firstStreamIdxOfType = 
+    [](std::span<AVStream *> const & streams, AVMediaType type) -> std::ptrdiff_t
     {
-      av_packet_unref(&pkt);
-      // Skip this packet
-      continue;
-    }
+      if(
+        auto const itFind = std::find_if(streams.cbegin(), streams.cend(), [type](AVStream const * stream) { return stream->codecpar->codec_type == type; });
+        itFind != streams.cend()
+      )
+        return (*itFind)->index;
+      else
+        return -1;
+    };
 
-    AVPacket *packet = av_packet_clone(&pkt);
+  auto 
+    videoStreamIndex = firstStreamIdxOfType(streams, AVMEDIA_TYPE_VIDEO),
+    audioStreamIndex = firstStreamIdxOfType(streams, AVMEDIA_TYPE_AUDIO);
 
-    // Check if we need to start a new segment
-    if (packet->stream_index == videoStreamIndex && packet->flags & AV_PKT_FLAG_KEY) {
-      // Send the current segment in the pipeline
-      
-      if (video_packets) {
-        QUEUE_ITEM *item = new QUEUE_ITEM();
-        item->packets = video_packets;
-        video_output_queue->push(item);
-      }
-      if (audio_packets) {
-        QUEUE_ITEM *item = new QUEUE_ITEM();
-        item->packets = audio_packets;
-        audio_output_queue->push(item);
-      }
+  if(videoStreamIndex == -1 || audioStreamIndex == -1) 
+    return errorCallback("Error searching for a video or audio stream");
 
-      // Start a new segment
-      video_packets = new std::vector<AVPacket *>();
-      audio_packets = new std::vector<AVPacket *>();
-    }
+  if(!streams[videoStreamIndex]->codecpar || !streams[audioStreamIndex]->codecpar) 
+    return errorCallback("Error finding video or audio codec parameters");
 
-    if (!video_packets || !audio_packets) {
-      av_packet_unref(packet);
-      throw std::runtime_error("error starting new segment");
-    }
+  Metadata metadata {
+    .spInputFormatContext = spInputFormatContext,
+    .videoStream = inputFormatContext->streams[videoStreamIndex],
+    .audioStream = inputFormatContext->streams[audioStreamIndex]
+  };
+  
+  auto const tb = inputFormatContext->streams[videoStreamIndex]->time_base;
+  auto const duration = inputFormatContext->duration / static_cast<double>(AV_TIME_BASE);
+
+  progressCallback(PROGRESS_BAR_NAME, 0.0);
+
+  videoOutputQueue.registerProducerActive();
+  audioOutputQueue.registerProducerActive();
+
+  videoOutputQueue.setMetadata(metadata);
+  audioOutputQueue.setMetadata(std::move(metadata));
+
+    auto announceProgress =
+    [
+      progressCallback, 
+      mult = static_cast<double>(tb.num) / tb.den / duration, 
+      packetIdx = std::size_t(0)
+    ] 
+    (int64_t pts) mutable
+    {
+      if(packetIdx % 1000 == 0)
+        progressCallback(PROGRESS_BAR_NAME, pts * mult);
+
+      ++packetIdx;
+    };
+
+  std::vector<Packet> 
+    video_packets,
+    audio_packets;
+  for(std::optional<Packet> optPacket; optPacket = inputFormatContext.readPacket();) 
+  {
+    auto & packet = optPacket.value();
     
-    if (packet->stream_index == videoStreamIndex) {
-      video_packets->push_back(packet);
-    } else if (packet->stream_index == audioStreamIndex) {
-      audio_packets->push_back(packet);
+    if(packet->stream_index == videoStreamIndex) 
+    {
+      announceProgress(packet.pts());
+
+      // Check if we need to start a new segment
+      if(packet.isFlaggedAs(AV_PKT_FLAG_KEY)) 
+      {
+        // Send the current segment in the pipeline
+        videoOutputQueue.push(QueueItem {std::move(video_packets)});
+        audioOutputQueue.push(QueueItem {std::move(audio_packets)});
+      }
+
+      video_packets.emplace_back(std::move(packet));
+    } 
+    else if(packet->stream_index == audioStreamIndex) 
+    {
+      audio_packets.emplace_back(std::move(packet));
     }
   }
 
-  video_output_queue->set_done(video_queue_id);
-  audio_output_queue->set_done(audio_queue_id);
+  videoOutputQueue.registerProducerDone();
+  audioOutputQueue.registerProducerDone();
+
+  progressCallback(PROGRESS_BAR_NAME, 1.0);
 }

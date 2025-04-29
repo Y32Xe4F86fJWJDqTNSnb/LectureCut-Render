@@ -1,72 +1,50 @@
-#include "pipeline.h"
+#include "join.h"
 
 #include <iostream>
 
-extern "C" {
-  #include "libavcodec/avcodec.h"
-  #include "libavformat/avformat.h"
-}
+#include <print>
 
 void join(
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
-    const char *filename
-)
-{
-  AVFormatContext *out_ctx;
+    PipelineQueue<QueueItem, Metadata> & inputQueue,
+    const char * filename,
+    ProgressCallback * progressCallback, 
+    ErrorCallback * errorCallback
+){
+  auto optOutputFormatContext = OutputFormatContext::open(filename);
+  if(!optOutputFormatContext)
+    return errorCallback("Failed to open input format context");
+  auto & outputFormatContext = optOutputFormatContext.value();
 
-  if (avformat_alloc_output_context2(&out_ctx, NULL, NULL, filename) < 0) {
-    throw std::runtime_error("error allocating output context");
-  };
+  auto 
+    * videoSteam = avformat_new_stream(outputFormatContext, nullptr),
+    * audioStream = avformat_new_stream(outputFormatContext, nullptr);
 
-  if (avio_open(&out_ctx->pb, filename, AVIO_FLAG_WRITE) < 0) {
-    throw std::runtime_error("error opening output file");
-  }
+  if(!videoSteam || !audioStream) 
+    return errorCallback("Error allocating output streams");
 
-  AVStream *videoSteam = avformat_new_stream(out_ctx, nullptr);
-  AVStream *audioStream = avformat_new_stream(out_ctx, nullptr);
+  Metadata metadata;
+  inputQueue.getMetadata(metadata);
 
-  if (videoSteam == nullptr || audioStream == nullptr) {
-    throw std::runtime_error("error allocating output streams");
-  }
-
-  METADATA **metadata_ptr;
-  input_queue->get_special(&metadata_ptr);
-  METADATA *metadata = *metadata_ptr;
-
-  if (avcodec_parameters_copy(videoSteam->codecpar, metadata->video_stream->codecpar) < 0) {
-    throw std::runtime_error("error copying video codec parameters");
-  }
-  if (avcodec_parameters_copy(audioStream->codecpar, metadata->audio_stream->codecpar) < 0) {
-    throw std::runtime_error("error copying audio codec parameters");
-  }
+  if(avcodec_parameters_copy(videoSteam->codecpar, metadata.videoStream->codecpar) < 0) 
+    return errorCallback("Error copying video codec parameters");
+  if(avcodec_parameters_copy(audioStream->codecpar, metadata.audioStream->codecpar) < 0) 
+    return errorCallback("Error copying audio codec parameters");
 
   videoSteam->codecpar->codec_tag = 0;
   audioStream->codecpar->codec_tag = 0;
 
-  videoSteam->time_base = metadata->video_stream->time_base;
-  audioStream->time_base = metadata->audio_stream->time_base;
+  videoSteam->time_base = metadata.videoStream->time_base;
+  audioStream->time_base = metadata.audioStream->time_base;
 
-  videoSteam->index = metadata->video_stream->index;
-  audioStream->index = metadata->audio_stream->index;
+  videoSteam->index = metadata.videoStream->index;
+  audioStream->index = metadata.audioStream->index;
 
-  avformat_write_header(out_ctx, NULL);
-
-  QUEUE_ITEM* in_ctx = new QUEUE_ITEM();
+  avformat_write_header(outputFormatContext, nullptr);
 
   // Loop through each input context and write its packets to the output file
-  while (input_queue->pop(in_ctx)) {
-    for (auto pkt : *in_ctx->packets) {
-      av_interleaved_write_frame(out_ctx, pkt);
-      av_packet_unref(pkt);
-    }
-    delete in_ctx->packets;
-  }
-  delete in_ctx;
-
-  // // Write the trailer to the output file
-  av_write_trailer(out_ctx);
-
-  // // Close the output file
-  avio_closep(&out_ctx->pb);
-  avformat_free_context(out_ctx);
+  for(QueueItem chunk; inputQueue.pop(chunk);) 
+  {
+    for(auto & packet : chunk.packets) 
+      av_write_frame(outputFormatContext, packet);
+  } 
 }

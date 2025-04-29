@@ -1,7 +1,12 @@
 #pragma once
 
-#define VERSION "0.1.0"
-#define DEFAULT_FFMPEG_LOG_LEVEL "error"
+#include <stdexcept>
+
+constexpr static char 
+  VERSION_NAME[] = {"0.2.0"},
+  PROGRESS_BAR_NAME[] = {"Cut Down"};
+
+#define DEFAULT_FFMPEG_LOG_LEVEL "ERROR"
 
 #define PRINT_VERBOSE 0
 
@@ -15,3 +20,8 @@
 #else
 #  define assert(condition) /*implementation defined*/
 #endif
+
+static void worker_thread_error_callback(char const * msg)
+{
+  throw std::runtime_error(msg);
+}

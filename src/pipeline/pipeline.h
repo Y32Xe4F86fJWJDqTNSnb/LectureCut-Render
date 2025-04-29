@@ -1,121 +1,270 @@
 #pragma once
 
-#include "../render.h"
-
 #include <deque>
-#include <condition_variable>
-#include <vector>
+#include <unordered_map>
+
+#include <optional>
+
+#include <functional>
 #include <algorithm>
-#include <iostream>
+#include <ranges>
 
-struct AVPacket;
-struct AVStream;
-struct AVFormatContext;
+#include <mutex>
+#include <shared_mutex>
+#include <condition_variable>
+#include <semaphore>
 
-template <typename T, typename S>
-class PIPELINE_QUEUE
+#include <chrono>
+
+#include <cassert>
+
+#include <format>
+
+template <std::movable T, std::movable M>
+class PipelineQueue
 {
-  std::deque<T> queue;
-  std::mutex mutex;
-  std::condition_variable cv;
-  std::vector<bool> done = {};
-  S *special = nullptr;
+public:
+  using value_type = T;
+  using metadata_type = M;
 
 public:
-  void push(T* data) {
-    std::unique_lock<std::mutex> lock(mutex);
-    // 36 is arbitrary (should hold around 3 min of video assunming a keyframe every 5 seconds)
-    cv.wait(lock, [&]
-            { return std::all_of(done.begin(), done.end(), [](bool x){ return x; }) ||
-                     queue.size() < 36; });
-
-    queue.push_back(*data);
-
-    lock.unlock();
-    cv.notify_one();
+  PipelineQueue(
+    std::size_t capacity = 36, 
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(5'000)
+  )
+    : m_nextIndexToPush(0)
+    , m_nextIndexToPop(0)
+    , m_capacity(capacity)
+    , m_timeout(timeout)
+    , m_metadata(timeout)
+  {
   }
 
-  bool pop(T* data) {
-    std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return std::all_of(done.begin(), done.end(), [](bool x){ return x; }) || queue.size() >= 1; });
-    
-    if (queue.size() == 0) return false;
+  void push(
+    std::convertible_to<T> auto && data,
+    std::optional<std::size_t> optGlobalElementIndex = std::nullopt
+  )
+  {
+    {
+      auto const itProducerDone = m_workersDone.find(std::this_thread::get_id());
+      if(itProducerDone == m_workersDone.end())
+        throw std::runtime_error("A producer was not registered as active before pushing to the queue.");
+      else if(itProducerDone->second)
+        throw std::runtime_error("A producer had already been declared finished before pushing to the queue.");
+    }
 
-    *data = queue.front();
-    queue.pop_front();
+    bool const suppliedElementIndex = optGlobalElementIndex.has_value();
 
-    lock.unlock();
-    cv.notify_one();
-    return true;
+    {
+      std::unique_lock<std::shared_mutex> lockQueue(m_mtxQueueAccess);
+
+      std::size_t index {};
+
+      if(suppliedElementIndex) {
+        index = optGlobalElementIndex.value();
+      }
+
+      auto const withinRange =
+        [this, &index, suppliedElementIndex] ()
+        {
+          if(!suppliedElementIndex)
+          {
+            index = m_nextIndexToPush;
+          }
+
+          if(suppliedElementIndex && index < m_nextIndexToPop)
+          {
+            throw std::runtime_error(std::format(
+              "Cannot push item with index {:d} because it is not greater than the oldest item in the queue with index {:d}",
+              index, m_nextIndexToPop
+            ));
+          }
+
+          return (index >= m_nextIndexToPop) && (index - m_nextIndexToPop < m_capacity);
+        };
+
+      if(!m_cvQueueAccess.wait_for(lockQueue, m_timeout, withinRange))
+        throw std::runtime_error("Queue starvation on side of producer");
+
+      m_queue.emplace_back(std::make_pair(index, std::forward<decltype(data)>(data)));
+      assert(std::ranges::count(m_queue, &std::optional<std::pair<std::size_t, T>>::has_value) <= m_capacity);
+
+      ++m_nextIndexToPush;
+    }
+
+    m_cvQueueAccess.notify_all();
   }
 
-  size_t size() {
-     std::lock_guard<std::mutex> lock(mutex);
-     return queue.size();
+  std::optional<std::size_t> pop(T & data)
+  {
+    std::optional<std::size_t> optIndex = std::nullopt;
+
+    {
+      std::unique_lock<std::shared_mutex> lockQueue(m_mtxQueueAccess); 
+
+      typename decltype(m_queue)::iterator itOldestItem;
+      bool isNonEmpty {};
+
+      auto const isNextIndexToPopOrEmpty =
+        [this, &itOldestItem, &isNonEmpty] ()
+        {
+          itOldestItem = p_findOldestItem();
+
+          isNonEmpty = itOldestItem != m_queue.end() && itOldestItem->has_value();
+
+          return (!isNonEmpty && p_allProducersDone()) || (isNonEmpty && itOldestItem->value().first == m_nextIndexToPop);
+        };
+
+      if(!m_cvQueueAccess.wait_for(lockQueue, m_timeout, isNextIndexToPopOrEmpty))
+        throw std::runtime_error("Queue starvation on side of consumer");
+
+      if(isNonEmpty)
+      {
+        std::size_t index {};
+        std::tie(index, data) = std::move(itOldestItem->value());
+        itOldestItem->reset();
+        assert(index == m_nextIndexToPop);
+        ++m_nextIndexToPop;
+
+        optIndex.emplace(index);
+
+        m_queue.erase(
+          std::ranges::begin(m_queue),
+          std::ranges::find_if(m_queue, &std::optional<std::pair<std::size_t, T>>::has_value)
+        );
+
+        lockQueue.unlock();
+        m_cvQueueAccess.notify_all();
+      }
+    }
+
+    return optIndex;
   }
 
-  size_t set_working() {
-    std::lock_guard<std::mutex> lock(mutex);
-    done.push_back(false);
-    return done.size() - 1;
+  void registerProducerActive()
+  {
+    std::scoped_lock<std::shared_mutex> lockQueue(m_mtxQueueAccess);
+
+    bool const itemWasPresent = !m_workersDone.emplace(std::this_thread::get_id(), false).second;
+
+    if(itemWasPresent)
+      throw std::runtime_error("A producer cannot register as active more than once.");
   }
 
-  void set_done(size_t index) {
-    std::unique_lock<std::mutex> lock(mutex);
-    done[index] = true;
-    lock.unlock();
-    cv.notify_one();
+  void registerProducerDone()
+  {
+    std::shared_lock<std::shared_mutex> lockQueue(m_mtxQueueAccess);
+
+    auto const itProducerDone = m_workersDone.find(std::this_thread::get_id());
+
+    if(itProducerDone == m_workersDone.end())
+      throw std::runtime_error("A producer had not been registered as active before being declared done.");
+
+    auto & producerDone = itProducerDone->second;
+
+    if(producerDone)
+      throw std::runtime_error("A producer cannot register as done more than once.");
+
+    producerDone = true;
+    m_cvQueueAccess.notify_all();
   }
 
-  bool all_done() {
-    std::lock_guard<std::mutex> lock(mutex);
-    return std::all_of(done.begin(), done.end(), [](bool x){ return x; });
+  std::size_t size() const
+  {
+    std::scoped_lock<std::shared_mutex> lockQueue(m_mtxQueueAccess);
+
+    return m_queue.size();
   }
 
-  void set_special(S *special) {
-    std::unique_lock<std::mutex> lock(mutex);
-    this->special = special;
-    lock.unlock();
-    cv.notify_one();
+  void setMetadata(std::convertible_to<M> auto && metadata)
+  {
+    m_metadata.setMetadata(std::forward<decltype(metadata)>(metadata));
   }
 
-  // blocks until special is set
-  void get_special(S **special) {
-    std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return std::all_of(done.begin(), done.end(), [](bool x){ return x; }) || this->special != nullptr; });
-    *special = this->special;
-    lock.unlock();
+  void getMetadata(M & metadata) const
+  {
+    m_metadata.getMetadata(metadata);
   }
+
+private:
+  auto p_findOldestItem(this auto && self)
+  {
+    return
+      std::ranges::min_element(
+        self.m_queue,
+        [](const auto & lhs, const auto & rhs)
+        {
+          return
+            lhs.has_value() &&
+            (
+              !rhs.has_value()
+              || (rhs.has_value() && lhs->first < rhs->first)
+            );
+        }
+      );
+  }
+
+  auto p_allProducersDone() const
+  {
+    return
+      std::all_of(
+        m_workersDone.begin(), m_workersDone.end(),
+        std::mem_fn(&decltype(m_workersDone)::value_type::second)
+      );
+  }
+
+private:
+  template <typename M>
+  class Metadata
+  {
+  public:
+    using metadata_type = M;
+
+  public:
+    Metadata(std::chrono::milliseconds timeout = std::chrono::milliseconds(5'000))
+      : m_smphValueIsSet(0)
+      , m_timeout(timeout)
+    {
+    }
+
+    void setMetadata(std::convertible_to<M> auto && metadata)
+    {
+      {
+        std::scoped_lock<std::shared_mutex> lock(m_mtxValueAccess);
+
+        if(m_metadata.has_value())
+          throw std::runtime_error("Metadata has been set more than once.");
+
+        m_metadata = std::make_optional(std::forward<decltype(metadata)>(metadata));
+      }
+      m_smphValueIsSet.release(m_smphValueIsSet.max());
+    }
+
+    void getMetadata(M & metadata) const
+    {
+      if(!m_smphValueIsSet.try_acquire_for(m_timeout))
+        throw std::runtime_error("Metadata starvation");
+      {
+        std::shared_lock<std::shared_mutex> lock(m_mtxValueAccess);
+
+        metadata = m_metadata.value();
+      }
+      m_smphValueIsSet.release();
+    }
+
+  private:
+    std::optional<M> m_metadata;
+    std::chrono::milliseconds m_timeout;
+    mutable std::counting_semaphore<std::numeric_limits<std::ptrdiff_t>::max()> m_smphValueIsSet;
+    mutable std::shared_mutex m_mtxValueAccess;
+  };
+
+private:
+  Metadata<M> m_metadata;
+  std::deque<std::optional<std::pair<std::size_t, T>>> m_queue;
+  std::size_t m_nextIndexToPush, m_nextIndexToPop, m_capacity;
+  std::unordered_map<std::thread::id, bool> m_workersDone;
+  std::chrono::milliseconds m_timeout;
+  mutable std::condition_variable_any m_cvQueueAccess;
+  mutable std::shared_mutex m_mtxQueueAccess;
 };
-
-struct QUEUE_ITEM {
-  std::vector<AVPacket*> *packets;
-};
-
-struct METADATA {
-  AVFormatContext *format_ctx;
-  AVStream *video_stream;
-  AVStream *audio_stream;
-};
-
-void segment(
-    const char *filename,
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *video_output_queue,
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *audio_output_queue
-);
-
-void transcode_video(
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *output_queue,
-    int quality,
-    cut_list *cut_list);
-
-void transcode_audio(
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *output_queue,
-    int quality,
-    cut_list *cut_list);
-
-void join(
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
-    const char *filename);

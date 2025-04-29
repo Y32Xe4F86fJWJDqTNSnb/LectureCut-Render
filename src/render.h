@@ -14,62 +14,66 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
-extern "C" {
+extern "C" 
+{
 #endif
 
-  typedef void error_callback(const char*);
+  typedef void ProgressCallback(const char*, double);
+  typedef void ErrorCallback(const char *);
   
-  EXPORT const char *version(error_callback* error);
+  EXPORT const char * version(ErrorCallback * errorCallback);
 
-  EXPORT void init(error_callback* error);
+  EXPORT void init(ErrorCallback * errorCallback);
 
-  struct cut
+  struct Cut
   {
     int64_t start;
     int64_t end;
   };
 
-  struct cut_list
+  struct CutList
   {
     long num_cuts;
-    cut* cuts;
+    Cut * cuts;
   };
 
-  typedef void progress_callback(const char*, double);
-
-  struct ArgumentResult {
-    const char* name;
-    const char* value;
+  struct ArgumentResult 
+  {
+    const char * name;
+    const char * value;
   };
 
-  struct ArgumentResultList {
+  struct ArgumentResultList 
+  {
     long num_args;
-    ArgumentResult* args;
+    ArgumentResult * args;
   };
 
   EXPORT void render(
-    const char *file,
-    const char *output,
-    cut_list cuts,
+    const char * file,
+    const char * output,
+    CutList cuts,
     ArgumentResultList args,
-    progress_callback *progress,
-    error_callback *error
+    ProgressCallback * progressCallback,
+    ErrorCallback * errorCallback
   );
 
-  struct Argument {
+  struct Argument 
+  {
     const char short_name;
-    const char* long_name;
-    const char* description;
+    const char * long_name;
+    const char * description;
     bool required;
     bool is_flag;
   };
 
-  struct ArgumentList {
+  struct ArgumentList 
+  {
     long num_args;
-    Argument* args;
+    Argument * args;
   };
 
-  EXPORT ArgumentList get_arguments(error_callback* error);
+  EXPORT ArgumentList get_arguments(ErrorCallback * errorCallback);
 
 #ifdef __cplusplus
 }
