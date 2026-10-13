@@ -16,7 +16,7 @@ void join(
   auto & outputFormatContext = optOutputFormatContext.value();
 
   auto 
-    * videoSteam = avformat_new_stream(outputFormatContext, nullptr),
+    * videoSteam  = avformat_new_stream(outputFormatContext, nullptr),
     * audioStream = avformat_new_stream(outputFormatContext, nullptr);
 
   if(!videoSteam || !audioStream) 
@@ -25,18 +25,16 @@ void join(
   Metadata metadata;
   inputQueue.getMetadata(metadata);
 
-  if(avcodec_parameters_copy(videoSteam->codecpar, metadata.videoStream->codecpar) < 0) 
-    return errorCallback("Error copying video codec parameters");
-  if(avcodec_parameters_copy(audioStream->codecpar, metadata.audioStream->codecpar) < 0) 
-    return errorCallback("Error copying audio codec parameters");
+  if(avcodec_parameters_copy(videoSteam ->codecpar, metadata.videoStream->codecpar) < 0) return errorCallback("Error copying video codec parameters");
+  if(avcodec_parameters_copy(audioStream->codecpar, metadata.audioStream->codecpar) < 0) return errorCallback("Error copying audio codec parameters");
 
-  videoSteam->codecpar->codec_tag = 0;
+  videoSteam ->codecpar->codec_tag = 0;
   audioStream->codecpar->codec_tag = 0;
 
-  videoSteam->time_base = metadata.videoStream->time_base;
+  videoSteam ->time_base = metadata.videoStream->time_base;
   audioStream->time_base = metadata.audioStream->time_base;
 
-  videoSteam->index = metadata.videoStream->index;
+  videoSteam ->index = metadata.videoStream->index;
   audioStream->index = metadata.audioStream->index;
 
   avformat_write_header(outputFormatContext, nullptr);

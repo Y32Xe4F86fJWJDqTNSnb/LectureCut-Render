@@ -14,8 +14,7 @@ class Packet
 public:
   Packet() 
     : m_packet(av_packet_alloc())
-  {
-  }
+  {}
 
   ~Packet() 
   {
@@ -28,8 +27,7 @@ public:
 
   Packet(Packet && other) noexcept
     : Packet(std::exchange(other.m_packet, nullptr))
-  {
-  }
+  {}
 
   Packet & operator = (Packet && other) 
   {
@@ -118,8 +116,7 @@ class Frame
 public:
   Frame() 
     : m_frame(av_frame_alloc())
-  {
-  }
+  {}
 
   ~Frame() 
   {
@@ -132,8 +129,7 @@ public:
 
   Frame(Frame && other) noexcept
     : Frame(std::exchange(other.m_frame, nullptr))
-  {
-  }
+  {}
 
   Frame & operator = (Frame && other) 
   {
@@ -186,8 +182,7 @@ class SwrCtx
 public:
   SwrCtx() noexcept
     : m_ctx(nullptr)
-  {
-  }
+  {}
 
   bool init(AVChannelLayout & out_ch_layout, AVSampleFormat out_sample_fmt, int out_sample_rate, AVChannelLayout & in_ch_layout, AVSampleFormat in_sample_fmt, int in_sample_rate, int log_offset = 0, void * log_ctx = nullptr)
   {
@@ -210,7 +205,7 @@ public:
     }
 
     auto const 
-      inputLength = static_cast<int>(inputSamplesPerChannel), 
+      inputLength  = static_cast<int>(inputSamplesPerChannel), 
       outputLength = static_cast<int>(outputBufferSizePerChannel);
 
     if(
@@ -289,8 +284,7 @@ public:
 protected:
   explicit FormatContext(AVFormatContext * ctx) noexcept
     : m_ctx(ctx)
-  {
-  }
+  {}
 
 protected:
   AVFormatContext * m_ctx;
@@ -305,8 +299,7 @@ public:
 
   InputFormatContext(InputFormatContext && other) noexcept
     : InputFormatContext(std::exchange(other.m_ctx, nullptr))
-  {
-  };
+  {};
 
   InputFormatContext & operator = (InputFormatContext && other) noexcept
   {
@@ -356,8 +349,7 @@ public:
 private:
 	InputFormatContext(AVFormatContext * ctx) noexcept
 	    : FormatContext(ctx)
-	{
-  }
+	{}
 };
 
 class OutputFormatContext : public FormatContext
@@ -369,8 +361,7 @@ public:
 
   OutputFormatContext(OutputFormatContext && other) noexcept
     : OutputFormatContext(std::exchange(other.m_ctx, nullptr))
-  {
-  };
+  {};
 
   OutputFormatContext & operator = (OutputFormatContext && other) noexcept
   {
@@ -417,8 +408,7 @@ public:
 private:
 	OutputFormatContext(AVFormatContext * ctx) noexcept
 	    : FormatContext(ctx)
-	{
-  }
+	{}
 };
 
 class CodecContext 
@@ -430,8 +420,7 @@ public:
 
   CodecContext(CodecContext && other) noexcept
     : CodecContext(std::exchange(other.m_ctx, nullptr))
-  {
-  };
+  {};
 
   CodecContext & operator = (CodecContext && other) noexcept
   {
@@ -535,8 +524,7 @@ public:
 private:
   CodecContext(AVCodecContext * ctx) noexcept
   : m_ctx(ctx)
-  {
-  }
+  {}
 
 private:
   AVCodecContext * m_ctx;

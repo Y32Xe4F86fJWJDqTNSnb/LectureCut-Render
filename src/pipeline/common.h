@@ -23,8 +23,8 @@ constexpr static auto testFlag =
     return (flags & flag) == flag; 
   };
 
-constexpr static auto projRefToPtr = [] (auto & t) { return &t; };
-constexpr static auto projPtrToRef = [] (auto * t) -> std::remove_pointer_t<decltype(t)> & { return *t; };
+constexpr static auto projRefToPtr = [](auto & t){ return &t; };
+constexpr static auto projPtrToRef = [](auto * t) -> std::remove_pointer_t<decltype(t)> & { return *t; };
 
 struct LocalCut
 {

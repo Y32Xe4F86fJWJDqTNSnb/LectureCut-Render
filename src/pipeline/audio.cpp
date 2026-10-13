@@ -3,6 +3,8 @@
 #include <memory>
 
 #include <span>
+#include <algorithm>
+#include <execution>
 #include <ranges>
 
 #include <string>
@@ -24,21 +26,25 @@ void transcode_audio(
 
   auto const native_stream_timebase = metadata.audioStream->time_base;
 
-  std::vector<LocalCut> cuts(cutList.num_cuts);
-  std::span<Cut> cut_list_span(cutList.cuts, cutList.num_cuts);
+  std::vector<LocalCut> cuts; cuts.reserve(cutList.num_cuts);
+  std::span<Cut const> cut_list_span(cutList.cuts, cutList.num_cuts);
 
   // convert all cuts to time base
   auto const offset = 
     (metadata.audioStream->start_time != AV_NOPTS_VALUE) 
     ? metadata.audioStream->start_time 
     : 0;
-  for(std::size_t i = 0; i < static_cast<std::size_t>(cutList.num_cuts); ++i)
-  {
-    cuts[i].start = 
-      av_rescale_q(cutList.cuts[i].start, CUT_TIMEBASE, native_stream_timebase) + offset;
-    cuts[i].end = 
-      av_rescale_q(cutList.cuts[i].end, CUT_TIMEBASE, native_stream_timebase) + offset;
-  }
+    
+  std::transform(std::execution::unseq,
+    cutList.cuts, std::next(cutList.cuts, cutList.num_cuts),
+    cuts.begin(),
+    [&](auto && cut){
+      return LocalCut {
+        .start = av_rescale_q(cut.start, CUT_TIMEBASE, native_stream_timebase) + offset,
+        .end   = av_rescale_q(cut.end  , CUT_TIMEBASE, native_stream_timebase) + offset
+      };
+    }
+  );
 
   #if PRINT_VERBOSE
   { // DEBUGGING
@@ -54,13 +60,13 @@ void transcode_audio(
 
   auto 
     first_cut_in_cur_seg = cuts.begin(),
-    cut_to_be_exited = first_cut_in_cur_seg;
+    cut_to_be_exited     = first_cut_in_cur_seg;
     
   std::vector<LocalCut> segment_cuts {};
 
-  int64_t centiseconds_of_complete_cuts_kept_before_segment = 0;
-
-  int64_t time_audio_delay_prev = 0; 
+  int64_t 
+    centiseconds_of_complete_cuts_kept_before_segment = 0,
+    time_audio_delay_prev = 0; 
 
   for(std::optional<std::size_t> itemIdx = std::nullopt; itemIdx = inputQueue.pop(chunk);)
   {
@@ -75,7 +81,7 @@ void transcode_audio(
     auto const [segment_packets_first_by_pts, segment_packets_last_by_pts] = std::ranges::minmax_element(chunk.packets, ptsLess);
     auto const 
       segment_start = segment_packets_first_by_pts->pts(),
-      segment_end = segment_packets_last_by_pts->getEndPts();
+      segment_end   = segment_packets_last_by_pts->getEndPts();
 
     // find all cuts in this segment
     segment_cuts.clear();
@@ -111,11 +117,10 @@ void transcode_audio(
     else 
     {
       if( // this segment is entirely contained in one cut
-        segment_cuts.size() == 1 
+           segment_cuts.size() == 1 
         && segment_cuts.front().start <= segment_start 
         && segment_cuts.front().end >= segment_end
-      ) // segment will be kept
-      {
+      ){ // segment will be kept
         handle_segment_contained_in_one_cut(
           chunk.packets,
           native_stream_timebase,
@@ -159,7 +164,7 @@ static void remove_disposable(std::vector<Packet> & packets)
 {
   std::erase_if(
     packets,
-    [] (Packet const & packet) {
+    [](Packet const & packet){
       return packet.isFlaggedAs(AV_PKT_FLAG_DISPOSABLE);
     }
   );
@@ -175,7 +180,7 @@ void handle_segment_contained_in_one_cut(
   int64_t & time_audio_delay_prev
 ){
   auto const time_discarded_before_first_and_only_cut_in_segment = 
-    segment_cuts.front().start 
+      segment_cuts.front().start 
     - av_rescale_q(centiseconds_of_complete_cuts_kept_before_segment, CUT_TIMEBASE, native_stream_timebase);
 
   auto time_audio_delay = time_audio_delay_prev;
@@ -302,8 +307,7 @@ void handle_segment_with_multiple_cuts(
     else if(
       auto const packet_presentation_end = r_packet.getEndPts();
       packet_presentation_end > cut_current->start
-    ) 
-    {
+    ){
       // if the end of the presentation of the packet is before or on the end of the cut
       if(packet_presentation_end <= cut_current->end) 
       {
@@ -324,7 +328,7 @@ void handle_segment_with_multiple_cuts(
 
   auto const 
     // array to carry the time discarded up until each cut in the segment
-    time_discarded_before_cuts = std::make_unique_for_overwrite<int64_t[]>(segment_cuts.size()),
+    time_discarded_before_cuts   = std::make_unique_for_overwrite<int64_t[]>(segment_cuts.size()),
     // array to carry the audio delay up until each cut in the segment
     time_audio_delay_before_cuts = std::make_unique_for_overwrite<int64_t[]>(segment_cuts.size());
   // initialize variable to store the sum of time from all cuts passed in the segment

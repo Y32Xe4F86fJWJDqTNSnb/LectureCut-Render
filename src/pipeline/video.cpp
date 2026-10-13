@@ -3,6 +3,8 @@
 #include <memory>
 
 #include <span>
+#include <algorithm>
+#include <execution>
 #include <ranges>
 
 #include <string>
@@ -26,8 +28,8 @@ void transcode_video(
 
   auto const native_stream_timebase = metadata.videoStream->time_base;
 
-  std::vector<LocalCut> cuts(cutList.num_cuts);
-  std::span<Cut> cut_list_span(cutList.cuts, cutList.num_cuts);
+  std::vector<LocalCut> cuts; cuts.reserve(cutList.num_cuts);
+  std::span<Cut const> cut_list_span(cutList.cuts, cutList.num_cuts);
 
   // convert all cuts to time base
   auto const offset = 
@@ -37,13 +39,16 @@ void transcode_video(
 
   outputQueue.setMetadata(std::move(metadata));
 
-  for(std::size_t i = 0; i < static_cast<std::size_t>(cutList.num_cuts); ++i)
-  {
-    cuts[i].start = 
-      av_rescale_q(cutList.cuts[i].start, CUT_TIMEBASE, native_stream_timebase) + offset;
-    cuts[i].end = 
-      av_rescale_q(cutList.cuts[i].end, CUT_TIMEBASE, native_stream_timebase) + offset;
-  }
+  std::transform(std::execution::unseq,
+    cutList.cuts, std::next(cutList.cuts, cutList.num_cuts),
+    cuts.begin(),
+    [&](auto && cut){
+      return LocalCut {
+        .start = av_rescale_q(cut.start, CUT_TIMEBASE, native_stream_timebase) + offset,
+        .end   = av_rescale_q(cut.end  , CUT_TIMEBASE, native_stream_timebase) + offset
+      };
+    }
+  );
 
   #if PRINT_VERBOSE
   { // DEBUGGING
@@ -59,19 +64,19 @@ void transcode_video(
 
   auto 
     first_cut_in_cur_seg = cuts.begin(),
-    cut_to_be_exited = first_cut_in_cur_seg;
+    cut_to_be_exited     = first_cut_in_cur_seg;
 
   std::vector<LocalCut> segment_cuts {};
 
-  int64_t centiseconds_of_complete_cuts_kept_before_segment = 0;
-
-  int64_t time_video_delay_prev = 0;
+  int64_t 
+    centiseconds_of_complete_cuts_kept_before_segment = 0,
+    time_video_delay_prev = 0;
 
   auto dts_prev = std::numeric_limits<int64_t>::min();
 
   for(std::optional<std::size_t> itemIdx = std::nullopt; itemIdx = inputQueue.pop(chunk);)
   {
-    auto interlacedItemIdx = (itemIdx.value() << 1);
+    auto const interlacedItemIdx = (itemIdx.value() << 1);
 
     if(chunk.packets.empty())
     {
@@ -82,7 +87,7 @@ void transcode_video(
     auto const [segment_packets_first_by_pts, segment_packets_last_by_pts] = std::ranges::minmax_element(chunk.packets, ptsLess);
     auto const 
       segment_start = segment_packets_first_by_pts->pts(),
-      segment_end = segment_packets_last_by_pts->getEndPts();
+      segment_end   = segment_packets_last_by_pts->getEndPts();
 
     // find all cuts in this segment
     segment_cuts.clear();
@@ -105,7 +110,7 @@ void transcode_video(
     // find the cut that will be completed / exited from next
     while(cut_to_be_exited->end <= segment_start) 
     {
-      const auto & last_cut_in_prev_seg = cut_list_span[cut_to_be_exited-cuts.begin()];
+      auto const & last_cut_in_prev_seg = cut_list_span[cut_to_be_exited-cuts.begin()];
       centiseconds_of_complete_cuts_kept_before_segment += last_cut_in_prev_seg.end - last_cut_in_prev_seg.start;
       ++cut_to_be_exited;
     }
@@ -118,11 +123,10 @@ void transcode_video(
     else 
     {
       if( // this segment is entirely contained in one cut
-        segment_cuts.size() == 1 
+           segment_cuts.size() == 1 
         && segment_cuts.front().start <= segment_start 
         && segment_cuts.front().end >= segment_end
-      ) // segment will be kept
-      {
+      ){ // segment will be kept
         handle_segment_contained_in_one_cut(
           chunk.packets,
           native_stream_timebase,
@@ -168,14 +172,14 @@ void remove_disposable(std::vector<Packet> & packets)
 {
   std::erase_if(
     packets,
-    [] (auto const & packet) {
+    [](auto const & packet){
       return packet.isFlaggedAs(AV_PKT_FLAG_DISPOSABLE);
     }
   );
 
   std::ranges::for_each(
     packets,
-    [] (auto & packet) {
+    [](auto & packet){
       if(packet.isFlaggedAs(AV_PKT_FLAG_DISCARD))
           packet.pts() = AV_NOPTS_VALUE;
     }
@@ -193,7 +197,7 @@ void handle_segment_contained_in_one_cut(
   int64_t & dts_prev
 ){
   auto const time_discarded_before_first_and_only_cut_in_segment = 
-    segment_cuts.front().start 
+      segment_cuts.front().start 
     - av_rescale_q(centiseconds_of_complete_cuts_kept_before_segment, CUT_TIMEBASE, native_stream_timebase);
 
   auto time_video_delay = time_video_delay_prev;
@@ -218,10 +222,8 @@ void handle_segment_contained_in_one_cut(
     packet.dts() -= offset;
 
     // just checking in case the input video is faulty
-    if(packet.pts() != AV_NOPTS_VALUE)
-      packet.pts() -= offset;
-    else
-      packet.addFlags(AV_PKT_FLAG_DISCARD);
+    if(packet.pts() != AV_NOPTS_VALUE) packet.pts() -= offset;
+    else                               packet.addFlags(AV_PKT_FLAG_DISCARD);
   }
 
   // start marking packets going backwards from the end of the cut as to not be displayed until the delay is accounted for
@@ -317,7 +319,7 @@ void handle_segment_with_multiple_cuts(
   // sort pointers to input packets by their presentation timestamps
   std::ranges::stable_sort(packets_sorted_pts, ptsLess, projPtrToRef);
 
-  auto const packets_sorted_pts_chunked_by_cut_starts_size = segment_cuts.size()+1;
+  auto const packets_sorted_pts_chunked_by_cut_starts_size = segment_cuts.size() + 1;
   auto const packets_sorted_pts_chunked_by_cut_starts = std::make_unique<std::vector<Packet *>[]>(packets_sorted_pts_chunked_by_cut_starts_size);
   for(
     auto cut_current = segment_cuts.cbegin(); 
@@ -363,16 +365,16 @@ void handle_segment_with_multiple_cuts(
   }
 
   constexpr auto packet_displayed = 
-    [] (Packet const & packet) {
+    [](Packet const & packet){
         return
           // the packet is going to be displayed, because
-          packet.isNotFlaggedAs(AV_PKT_FLAG_DISPOSABLE, AV_PKT_FLAG_DISCARD) // it is neither going to be deleted, nor going to be hidden 
+             packet.isNotFlaggedAs(AV_PKT_FLAG_DISPOSABLE, AV_PKT_FLAG_DISCARD) // it is neither going to be deleted, nor going to be hidden 
           && packet.pts() != AV_NOPTS_VALUE; // and has a presentation timestamp
     };
 
   auto const 
     // array to carry the time discarded up until each cut in the segment
-    time_discarded_before_cuts = std::make_unique_for_overwrite<int64_t[]>(segment_cuts.size()),
+    time_discarded_before_cuts   = std::make_unique_for_overwrite<int64_t[]>(segment_cuts.size()),
     // array to carry the video delay up until each cut in the segment
     time_video_delay_before_cuts = std::make_unique_for_overwrite<int64_t[]>(segment_cuts.size());
   // initialize variable to store the sum of time from all cuts passed in the segment
@@ -435,10 +437,8 @@ void handle_segment_with_multiple_cuts(
       packet_sorted_pts_after_cut->dts() -= offset;
 
       // just checking in case the input video is faulty
-      if(packet_sorted_pts_after_cut->pts() != AV_NOPTS_VALUE) 
-        packet_sorted_pts_after_cut->pts() -= offset;
-      else
-        packet_sorted_pts_after_cut->addFlags(AV_PKT_FLAG_DISCARD);
+      if(packet_sorted_pts_after_cut->pts() != AV_NOPTS_VALUE) packet_sorted_pts_after_cut->pts() -= offset;
+      else                                                     packet_sorted_pts_after_cut->addFlags(AV_PKT_FLAG_DISCARD);
     }
 
     // start marking packets going backwards from the end the end of the cut as to not be displayed until the delay is accounted for

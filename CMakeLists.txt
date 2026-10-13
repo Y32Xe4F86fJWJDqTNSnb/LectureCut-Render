@@ -58,7 +58,7 @@ include_directories(
         ${AVFORMAT_INCLUDE_DIR}
 )
 
-set (sources 
+set(sources 
         src/render.cpp
         src/pipeline/segmentation.cpp
         src/pipeline/join.cpp

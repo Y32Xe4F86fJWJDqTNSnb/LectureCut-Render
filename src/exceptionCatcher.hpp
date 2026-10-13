@@ -9,22 +9,16 @@
 class ExceptionCatcher
 {
   public:
-    ExceptionCatcher() = default;
-    ExceptionCatcher(ExceptionCatcher const & other) = delete;
+    ExceptionCatcher()                                             = default;
+    ExceptionCatcher(ExceptionCatcher const & other)               = delete;
     ExceptionCatcher & operator = (ExceptionCatcher const & other) = delete;
-    ExceptionCatcher(ExceptionCatcher && other) = default;
-    ExceptionCatcher & operator = (ExceptionCatcher && other) = default;
+    ExceptionCatcher(ExceptionCatcher && other)                    = default;
+    ExceptionCatcher & operator = (ExceptionCatcher && other)      = default;
 
     void operator () (auto && callable, auto && ... args)
     {
-      try 
-      {
-        callable(std::forward<decltype(args)>(args) ...);
-      }
-      catch (...) 
-      {
-        exceptionPointer = std::current_exception();
-      }
+      try{ callable(std::forward<decltype(args)>(args) ...); }
+      catch(...){ exceptionPointer = std::current_exception(); }
     }
 
     void rethrow()
@@ -39,18 +33,9 @@ class ExceptionCatcher
     {
         if(exceptionPointer) 
         {
-          try 
-          {
-              std::rethrow_exception(exceptionPointer);
-          }
-          catch (std::exception const & exc)
-          {
-              return std::format("Worker thread exception message: {:s}\n", exc.what());
-          }
-          catch (...)
-          {
-              return std::format("Worker thread exception.");
-          }
+          try{ std::rethrow_exception(exceptionPointer); }
+          catch(std::exception const & exc){ return std::format("Worker thread exception message: {:s}\n", exc.what()); }
+          catch(...)                       { return std::format("Worker thread exception."); }
         }
 
         return std::nullopt;
@@ -87,10 +72,10 @@ public:
       );
   }
 
-  ExceptionCaughtThread(ExceptionCaughtThread const & other) = delete;
+  ExceptionCaughtThread(ExceptionCaughtThread const & other)               = delete;
   ExceptionCaughtThread & operator = (ExceptionCaughtThread const & other) = delete;
-  ExceptionCaughtThread(ExceptionCaughtThread && other) = default;
-  ExceptionCaughtThread & operator = (ExceptionCaughtThread && other) = default;
+  ExceptionCaughtThread(ExceptionCaughtThread && other)                    = default;
+  ExceptionCaughtThread & operator = (ExceptionCaughtThread && other)      = default;
 
   void join()
   {

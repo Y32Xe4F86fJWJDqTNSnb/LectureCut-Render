@@ -32,19 +32,18 @@ public:
     std::size_t capacity = 36, 
     std::chrono::milliseconds timeout = std::chrono::milliseconds(5'000)
   )
-    : m_nextIndexToPush(0)
-    , m_nextIndexToPop(0)
-    , m_capacity(capacity)
-    , m_timeout(timeout)
-    , m_metadata(timeout)
+    : m_nextIndexToPush (0)
+    , m_nextIndexToPop  (0)
+    , m_capacity        (capacity)
+    , m_timeout         (timeout)
+    , m_metadata        (timeout)
   {
   }
 
   void push(
     std::convertible_to<T> auto && data,
     std::optional<std::size_t> optGlobalElementIndex = std::nullopt
-  )
-  {
+  ){
     {
       auto const itProducerDone = m_workersDone.find(std::this_thread::get_id());
       if(itProducerDone == m_workersDone.end())
@@ -60,12 +59,12 @@ public:
 
       std::size_t index {};
 
-      if(suppliedElementIndex) {
+      if(suppliedElementIndex){
         index = optGlobalElementIndex.value();
       }
 
       auto const withinRange =
-        [this, &index, suppliedElementIndex] ()
+        [this, &index, suppliedElementIndex]
         {
           if(!suppliedElementIndex)
           {
@@ -106,7 +105,7 @@ public:
       bool isNonEmpty {};
 
       auto const isNextIndexToPopOrEmpty =
-        [this, &itOldestItem, &isNonEmpty] ()
+        [this, &itOldestItem, &isNonEmpty]
         {
           itOldestItem = p_findOldestItem();
 
@@ -224,8 +223,7 @@ private:
     Metadata(std::chrono::milliseconds timeout = std::chrono::milliseconds(5'000))
       : m_smphValueIsSet(0)
       , m_timeout(timeout)
-    {
-    }
+    {}
 
     void setMetadata(std::convertible_to<M> auto && metadata)
     {
